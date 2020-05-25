@@ -1,0 +1,327 @@
+.dseg
+	TIME:
+		.byte 6
+	LINE:
+		.byte 8
+.cseg
+jmp RESET
+
+.org OC1Aaddr
+jmp INTERRUPT
+
+.equ DISP_ON		= 0x0F
+.equ E_MODE			= 0x06
+.equ FN_SET			= 0x28 ;4 bit, 2 line, 5x8
+.equ LCD_CLEAR		= 0x01
+.equ BLGT			= 2
+.equ E				= 1 
+.equ RS				= 0 
+.equ LINE_SIZE		= 8
+.equ N				= 1
+.equ SECONDS_TICKS	= 62500-1 ;16/256MHz
+
+.def Tmp1			= r16
+
+RESET: ;**** Start of system initialization ****
+; Initialize (Data-)SRAM
+clr Tmp1
+ldi YL,0x00 ; RAMEND+1
+ldi YH,0x08
+clr ZH
+ldi ZL,$60 ; set Z-pointer to start of SRAM
+Init_SRAM:
+st Z+,Tmp1
+cp ZL,YL ; up to the very end - no stack right now!
+cpc ZH,YH
+brlo Init_SRAM
+
+; Initialize registers
+clr Tmp1 ; fill RAM & regs with 0x00
+clr ZH
+ldi ZL,$00 ; set Z-pointer to 0
+Init_Regs:
+st Z+,Tmp1
+cpi ZL,$1E ; clear regs up to R29
+brne Init_Regs
+
+
+START:
+	ldi Tmp1,high(RAMEND)
+	out SPH,Tmp1
+	ldi Tmp1,low(RAMEND)
+	out SPL,Tmp1
+	call TIMER1_INIT
+	call LCD_INIT
+	call WAIT
+	call LCD_ERASE
+	call WAIT
+	call TIMER1_INIT
+	call WAIT
+	sei ; enable interrupts globally
+	MAIN:
+		jmp MAIN
+
+TIMER1_INIT:
+	ldi r16,(1<<WGM12)|(1<<CS12)
+	sts TCCR1B,r16
+	ldi r16,HIGH(SECONDS_TICKS)
+	sts OCR1AH,r16
+	ldi r16,LOW(SECONDS_TICKS)
+	sts OCR1AL,r16
+	ldi r16,(1<<OCIE1A)
+	sts TIMSK1,r16
+	ret
+
+INTERRUPT:
+	push r16
+	in r16,SREG
+	push r16
+	push r17
+	call TIME_TICK
+	call TIME_FORMAT
+	call LINE_PRINT
+	pop r17
+	pop r16
+	out SREG,r16
+	pop r16
+	reti
+
+TIME_TEST:
+	call TIME_TICK	;LOOP
+	jmp TIME_TEST
+
+
+TIME_TICK:
+	call XPOINTTIME
+
+	s0:
+		ld r16,x
+		cpi r16,9
+		breq s1
+		subi r16,-1
+		st x,r16
+		jmp time_end
+
+	s1:
+		clr r16
+		st x, r16
+		adiw xl,1
+		ld r16,x
+		cpi r16,5
+		breq m0
+		subi r16,-1
+		st x,r16
+		jmp time_end
+
+	m0:
+		clr r16
+		st x, r16
+		adiw xl,1
+		ld r16,x
+		cpi r16,9
+		breq m1
+		subi r16,-1
+		st x,r16
+		jmp time_end
+
+	m1:
+		clr r16
+		st x, r16
+		adiw xl,1
+		ld r16,x
+		cpi r16,5
+		breq h0
+		subi r16,-1
+		st x,r16
+		jmp time_end
+
+	h0:
+		clr r16
+		st x, r16
+		adiw xl,1
+		ld r16,x
+		cpi r16,9
+		breq h1
+		subi r16,-1
+		st x,r16
+		cpi r16,4
+		breq midnight_check
+		jmp time_end
+
+	h1:
+		clr r16
+		st x, r16
+		adiw xl,1
+		ld r16,x
+		subi r16,-1
+		st x,r16
+		jmp time_end
+
+	midnight_check:
+		adiw xl,1
+		ld r16,x
+		cpi r16,2
+		brne time_end
+		call midnight
+
+	time_end:
+		ret
+
+MIDNIGHT:
+	ldi r16,0
+	st x,r16
+	sbiw xl,1
+	st x,r16
+	ret
+
+XPOINTTIME:
+	ldi xh,high(TIME*2)
+	ldi xl,low(TIME*2)
+	ret
+
+ZPOINTLINE:
+	ldi ZH,HIGH(LINE*2)
+	ldi ZL,LOW(LINE*2)
+	ret
+
+TIME_FORMAT:
+	call XPOINTTIME
+	call ZPOINTLINE
+	adiw ZL,8
+	ldi r17,3
+	jmp FLOOP1
+	FLOOP:
+		ldi r16,0x3A
+		st Z,r16
+		FLOOP1:
+			ld r16,X+ 
+			subi r16,-0x30
+			st -Z,r16
+			ld r16,X+
+			subi r16,-0x30
+			st -Z,r16
+			sbiw ZL,1
+			dec r17
+			brne FLOOP
+			ret
+LCD_INIT:
+	call LCD_PORT_INIT
+	call BACKLIGHT_ON
+	call WAIT
+
+	;initiate 4-bit mode
+	ldi r16,$30
+	call LCD_WRITE4
+	call LCD_WRITE4
+	call LCD_WRITE4
+	ldi r16,$20
+	call LCD_WRITE4
+
+	;configure display
+	;function set, 4 bit, 2 line, 5x8font
+	ldi r16,FN_SET
+	call LCD_COMMAND
+
+	;display on, cursor on, cursor blink
+	ldi r16,DISP_ON
+	call LCD_COMMAND
+
+	;clear display
+	ldi r16,LCD_CLEAR
+	call LCD_COMMAND
+
+	;entry mod, incement cursor, no shift
+	ldi r16,E_MODE
+	call LCD_COMMAND
+	ret
+
+LCD_PRINT:
+	LOOP:
+		ld r16,Z+
+		call LCD_ASCII
+		dec r17
+		cpi r17,0
+		breq END_STRING
+		jmp LOOP
+	END_STRING:
+		ret
+
+LINE_PRINT:
+	call LCD_HOME
+	call ZPOINTLINE
+	ldi r17,LINE_SIZE
+	call LCD_PRINT
+	ret
+
+LCD_HOME:
+	ldi r16,0x02
+	call LCD_COMMAND
+	ret
+
+LCD_ERASE:
+	ldi r16,0x01
+	call LCD_COMMAND
+	ret
+
+BACKLIGHT_ON:
+	sbi PORTB,BLGT
+	ret
+
+BACKLIGHT_OFF:
+	cbi PORTB,BLGT
+	ret
+
+LCD_WRITE4:
+	sbi PORTB,E
+	out PORTD,r16
+	cbi PORTB,E
+	call WAIT
+	ret
+
+LCD_WRITE8:
+	call LCD_WRITE4
+	swap r16
+	call LCD_WRITE4
+	ret
+
+LCD_ASCII:
+	sbi PORTB,RS
+	call LCD_WRITE8
+	ret
+
+LCD_COMMAND:
+	cbi PORTB,RS
+	call LCD_WRITE8
+	ret
+
+LCD_PORT_INIT:
+	ldi r16,0xFF
+	out DDRB,r16
+	out DDRD,r16	
+	ret
+
+WAIT:
+	ldi r23,5*N
+D1:
+	adiw r24,8
+	brne D1
+	dec r23
+	brne D1
+	ret
+
+
+SETTIME:
+	call XPOINTTIME
+	ldi r16,0
+	st x+,r16
+	ldi r16,4
+	st x+,r16
+	ldi r16,9
+	st x+,r16
+	ldi r16,5
+	st x+,r16
+	ldi r16,3
+	st x+,r16
+	ldi r16,2
+	st x+,r16
+	ret
